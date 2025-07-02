@@ -9,7 +9,7 @@ load(
     "strip_packaging_and_classifier_and_version",
 )
 load("//private/lib:coordinates.bzl", "to_external_form", "unpack_coordinates")
-load("//private/rules:coursier.bzl", "DEFAULT_AAR_IMPORT_LABEL", "coursier_fetch", "pinned_coursier_fetch")
+load("//private/rules:coursier.bzl", "DEFAULT_AAR_IMPORT_LABEL", "coursier_fetch", "pinned_coursier_fetch", "compute_dependency_inputs_signature")
 load("//private/rules:unpinned_maven_pin_command_alias.bzl", "unpinned_maven_pin_command_alias")
 load("//private/rules:v1_lock_file.bzl", "v1_lock_file")
 load("//private/rules:v2_lock_file.bzl", "v2_lock_file")
@@ -386,6 +386,22 @@ def remove_fields(s):
         if k != "to_json" and k != "to_proto" and getattr(s, k, None)
     } | {"version": getattr(s, "version", "")}
 
+def _normalize_repository_attributes(repositories, artifacts, boms, excluded_artifacts):
+    """Normalize repository rule attributes to create stable cache keys.
+    
+    This function ensures that semantically equivalent configurations
+    produce identical repository rule attributes, improving cache hit rates.
+    """
+    # Sort repositories to make order-independent 
+    normalized_repositories = sorted(repositories) if repositories else []
+    
+    # Sort JSON-encoded artifacts/boms/exclusions for stable ordering
+    normalized_artifacts = sorted(artifacts) if artifacts else []
+    normalized_boms = sorted(boms) if boms else []
+    normalized_excluded = sorted(excluded_artifacts) if excluded_artifacts else []
+    
+    return (normalized_repositories, normalized_artifacts, normalized_boms, normalized_excluded)
+
 def maven_impl(mctx):
     repos = {}
     overrides = {}
@@ -518,6 +534,14 @@ def maven_impl(mctx):
             repo["repositories"] = existing_repos
 
         if repo.get("resolver", _DEFAULT_RESOLVER) == "coursier":
+            # Normalize attributes for stable caching
+            norm_repos, norm_artifacts, norm_boms, norm_excluded = _normalize_repository_attributes(
+                repo.get("repositories"),
+                artifacts_json,
+                boms_json, 
+                excluded_artifacts_json
+            )
+            
             coursier_fetch(
                 # Name this repository "unpinned_{name}" if the user specified a
                 # maven_install.json file. The actual @{name} repository will be
@@ -526,13 +550,13 @@ def maven_impl(mctx):
                 name = "unpinned_" + name if repo.get("lock_file") else name,
                 pinned_repo_name = name if repo.get("lock_file") else None,
                 user_provided_name = name,
-                repositories = repo.get("repositories"),
-                artifacts = artifacts_json,
-                boms = boms_json,
+                repositories = norm_repos,  # ✅ Normalized 
+                artifacts = norm_artifacts,  # ✅ Normalized
+                boms = norm_boms,  # ✅ Normalized
+                excluded_artifacts = norm_excluded,  # ✅ Normalized
                 fail_on_missing_checksum = repo.get("fail_on_missing_checksum"),
                 fetch_sources = repo.get("fetch_sources"),
                 fetch_javadoc = repo.get("fetch_javadoc"),
-                excluded_artifacts = excluded_artifacts_json,
                 generate_compat_repositories = False,
                 version_conflict_policy = repo.get("version_conflict_policy"),
                 override_targets = overrides.get(name),
@@ -585,12 +609,20 @@ def maven_impl(mctx):
             created = download_pinned_deps(mctx = mctx, artifacts = artifacts, http_files = http_files, has_m2local = importer.has_m2local(lock_file))
             existing_repos.extend(created)
 
+            # Apply same normalization to pinned repository for consistency
+            norm_repos_pinned, norm_artifacts_pinned, norm_boms_pinned, norm_excluded_pinned = _normalize_repository_attributes(
+                repo.get("repositories"),
+                artifacts_json,
+                boms_json,
+                excluded_artifacts_json
+            )
+            
             pinned_coursier_fetch(
                 name = name,
                 user_provided_name = name,
-                repositories = repo.get("repositories"),
-                boms = boms_json,
-                artifacts = artifacts_json,
+                repositories = norm_repos_pinned,  # ✅ Normalized
+                boms = norm_boms_pinned,  # ✅ Normalized
+                artifacts = norm_artifacts_pinned,  # ✅ Normalized
                 fetch_sources = repo.get("fetch_sources"),
                 fetch_javadoc = repo.get("fetch_javadoc"),
                 resolver = repo.get("resolver", _DEFAULT_RESOLVER),
@@ -605,7 +637,7 @@ def maven_impl(mctx):
                 use_starlark_android_rules = repo.get("use_starlark_android_rules"),
                 aar_import_bzl_label = repo.get("aar_import_bzl_label"),
                 duplicate_version_warning = repo.get("duplicate_version_warning"),
-                excluded_artifacts = excluded_artifacts_json,
+                excluded_artifacts = norm_excluded_pinned,  # ✅ Normalized
                 repin_instructions = repo.get("repin_instructions"),
             )
 

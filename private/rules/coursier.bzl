@@ -911,18 +911,16 @@ def make_coursier_dep_tree(
         cmd.append("--default=true")
 
     environment = {}
-    if not _is_unpinned(repository_ctx):
-        coursier_cache_location = get_coursier_cache_or_default(
-            repository_ctx,
-            False,
-        )
-        cmd.extend(["--cache", coursier_cache_location])  # Download into $output_base/external/$maven_repo_name/v1
+    # ALWAYS use shared cache for better performance across repository invalidations
+    # Previously, pinned repos used repository-local cache which got wiped on MODULE.bazel changes
+    coursier_cache_location = get_coursier_cache_or_default(
+        repository_ctx,
+        True,  # ✅ Force shared cache for ALL repositories (pinned and unpinned)
+    )
+    cmd.extend(["--cache", coursier_cache_location])
 
-        # If not using the shared cache and the user did not specify a COURSIER_CACHE, set the default
-        # value to prevent Coursier from writing into home directories.
-        # https://github.com/bazelbuild/rules_jvm_external/issues/301
-        # https://github.com/coursier/coursier/blob/1cbbf39b88ee88944a8d892789680cdb15be4714/modules/paths/src/main/java/coursier/paths/CoursierPaths.java#L29-L56
-        environment = {"COURSIER_CACHE": str(repository_ctx.path(coursier_cache_location))}
+    # Set COURSIER_CACHE environment variable for consistency
+    environment = {"COURSIER_CACHE": coursier_cache_location}
 
     cmd.extend(additional_coursier_options)
 
@@ -1091,9 +1089,10 @@ def _coursier_fetch_impl(repository_ctx):
     #
     # We assume that coursier uses the default cache location
     # TODO(jin): allow custom cache locations
+    # Always use shared cache for consistency 
     coursier_cache_path = get_coursier_cache_or_default(
         repository_ctx,
-        _is_unpinned(repository_ctx),
+        True,  # ✅ Force shared cache for ALL repositories
     ).replace("//", "/")
 
     for artifact in dep_tree["dependencies"]:
